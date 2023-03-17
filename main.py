@@ -4,11 +4,11 @@ import os
 import os.path
 from concurrent.futures import ProcessPoolExecutor
 from typing import Optional
+
 import cv2
-import scipy.optimize as opt
 import numpy as np
 import numpy.typing as npt
-
+import scipy.optimize as opt
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

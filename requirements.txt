@@ -1,3 +1,2 @@
 opencv-python-headless>=4.7.0
 numpy>=1.22.0
-scipy>=1.9.0

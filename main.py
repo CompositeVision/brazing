@@ -8,13 +8,12 @@ from typing import Optional
 import cv2
 import numpy as np
 import numpy.typing as npt
-import scipy.optimize as opt
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 DEBUG_IMAGES = False
-POROSITY_LEVEL = 100
+POROSITY_LEVEL = 110
 
 
 def process_image(image_path: str) -> None:
@@ -53,88 +52,69 @@ def process_image(image_path: str) -> None:
 
     tube_crops = []
     for component in components:
-        tube_masked = np.where(component, image, 0).astype("uint8")
+        tube_masked = cv2.bitwise_and(component, image)
         xmin, ymin, w, h = cv2.boundingRect(tube_masked)
         crop = tube_masked[ymin : ymin + h, xmin : xmin + w]
         tube_crops.append(crop)
 
     porosities = []
     with ProcessPoolExecutor(max_workers=len(tube_crops)) as pool:
-        for i, crop in enumerate(tube_crops, start=1):
-            fut = pool.submit(process_tube, crop, image_path=image_path, tube_id=i)
-            porosities.append(fut)
+        porosities = list(pool.map(process_tube, tube_crops))
 
-    porosities = [p.result() for p in porosities]
+    # Step 5: Output results
+
+    if DEBUG_IMAGES:
+        tube_crop_debug_images = [image for (porosity, image) in porosities]
+        debug_image = np.concatenate(tube_crop_debug_images, axis=1)
+        save_to = os.path.join("debug_images", image_path)
+        os.makedirs(os.path.dirname(save_to), exist_ok=True)
+
+        if cv2.imwrite(save_to, debug_image):
+            logger.debug(f"Saved debug image {save_to}")
+        else:
+            logger.debug(f"Failed to save debug image {save_to}")
 
     print(f"Estimated porosities for {image_path}:")
-    for i, porosity in enumerate(porosities, start=1):
+    for i, (porosity, _) in enumerate(porosities, start=1):
         print(f"Tube {i}: {porosity * 100:.4f}%")
 
 
-def draw_rectangle(image: npt.NDArray["uint8"], x0, y0, h, w, angle):
-    x1 = int(x0 - np.sin(angle) * w / 2 + np.cos(angle) * h / 2)
-    x2 = int(x0 + np.sin(angle) * w / 2 + np.cos(angle) * h / 2)
-    x3 = int(x0 + np.sin(angle) * w / 2 - np.cos(angle) * h / 2)
-    x4 = int(x0 - np.sin(angle) * w / 2 - np.cos(angle) * h / 2)
-    y1 = int(y0 - np.cos(angle) * w / 2 - np.sin(angle) * h / 2)
-    y2 = int(y0 + np.cos(angle) * w / 2 - np.sin(angle) * h / 2)
-    y3 = int(y0 + np.cos(angle) * w / 2 + np.sin(angle) * h / 2)
-    y4 = int(y0 - np.cos(angle) * w / 2 + np.sin(angle) * h / 2)
-
-    points = np.array([[x1, y1], [x2, y2], [x3, y3], [x4, y4]])
-    cv2.fillConvexPoly(image, points, 255)
-
+def fill_holes(image: npt.NDArray["uint8"]) -> npt.NDArray["uint8"]:
+    image = np.pad(image, 1)
+    cv2.floodFill(image, None, (0, 0), 1)
+    image = image[1:-1, 1:-1]
+    image = np.where(image != 1, 255, 0).astype("uint8")
     return image
 
 
-def process_tube(image: npt.NDArray["uint8"], **kwargs) -> Optional[float]:
-    """Compute porosity level of the brazing area of the tube
+def leave_largest_component(image) -> npt.NDArray["uint8"]:
+    numLabels, labels, stats, centroids = cv2.connectedComponentsWithStats(image, connectivity=4)
+    max_label, max_size = max([(i, stats[i, cv2.CC_STAT_AREA]) for i in range(1, numLabels)], key=lambda x: x[1])
+    image = np.where(labels == max_label, 255, 0).astype("uint8")
+    return image
 
-    The region of interest on a single tube image is the brazing are.
-    In order to locate it, we fit a rotated rectangle over the tube image
-    so it covers most of the brazing area and doesn't cover the double walls.
-    """
 
-    # 1. Estimate rectangular brazing area based on optimal pixel values
+def process_tube(image: npt.NDArray["uint8"]) -> tuple[float, Optional[npt.NDArray["uint8"]]]:
+    """Compute porosity level of the brazing area of the tube"""
 
-    def rel_to_abs_coords(x0, y0, h, w):
-        """Helper function used to map [0, 1] to [0, H(W)]"""
-        x0 = image.shape[1] * x0
-        y0 = image.shape[0] * y0
-        h = image.shape[0] * h
-        w = image.shape[1] * w
-        return x0, y0, h, w
+    image_equalized = cv2.equalizeHist(image)
 
-    lut = np.arange(256)
-    lut[0] = -20
-    lut[(1 <= lut) & (lut <= 60)] = -30
-    lut[(60 <= lut) & (lut <= 99)] = 10
-    lut[(99 <= lut) & (lut <= 255)] = -5
+    # Cut off dark background (inner double wall)
+    _, mask = cv2.threshold(image_equalized, 45, 255, type=cv2.THRESH_TOZERO)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, ksize=(5, 5))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=5)
 
-    def cost(x0, y0, h, w, angle):
-        x0, y0, h, w = rel_to_abs_coords(x0, y0, h, w)
-        mask = draw_rectangle(np.zeros_like(image), x0, y0, h, w, angle)
+    # Cut off bright outside-of-brazing area
+    _, mask = cv2.threshold(mask, 180, 255, type=cv2.THRESH_TOZERO_INV)
+    # Cut vertical adjacent (outer double walls)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((9, 3)), iterations=3)
 
-        pixel_cost = cv2.LUT(image, lut)
-        pixel_cost = np.where(mask, pixel_cost, 0)
+    mask = fill_holes(mask)
 
-        return -np.sum(pixel_cost)
+    brazing_mask = leave_largest_component(mask)
 
-    def cost_utility(x):
-        return cost(*x)
-
-    bounds = opt.Bounds([0.0, 0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 1.0, np.deg2rad(180)])
-    solution = opt.dual_annealing(cost_utility, bounds)
-
-    if not solution.success:
-        logger.warning("Couldn't find brazing area for tube #{}", kwargs["tube_id"])
-        return
-
-    # 2. Compute porosity value
-
-    x0, y0, h, w, angle = solution.x
-    brazing_mask = draw_rectangle(np.zeros_like(image), *rel_to_abs_coords(x0, y0, h, w), angle)
-    porosity_mask = ((np.where(brazing_mask, image, 0) > POROSITY_LEVEL) * 255).astype("uint8")
+    _, porosity_mask = cv2.threshold(image, POROSITY_LEVEL, 255, cv2.THRESH_BINARY)
+    porosity_mask = cv2.bitwise_and(porosity_mask, brazing_mask)
 
     whole_area = np.count_nonzero(brazing_mask)
     porosity_area = np.count_nonzero(porosity_mask)
@@ -143,23 +123,18 @@ def process_tube(image: npt.NDArray["uint8"], **kwargs) -> Optional[float]:
 
     # 3. Optionally output debug images
 
+    debug_image = None
+
     if DEBUG_IMAGES:
         # Invert image, highlight brazing and porosity areas
         inv_image = (255 - image).astype("uint8")
         inv_image = cv2.addWeighted(inv_image, 0.8, brazing_mask, 0.2, 0)
         inv_image = cv2.cvtColor(inv_image, cv2.COLOR_GRAY2RGB)
         porosity_mask = cv2.merge((np.zeros_like(porosity_mask), np.zeros_like(porosity_mask), porosity_mask))
-        inv_image = cv2.addWeighted(inv_image, 0.7, porosity_mask, 0.3, 0)
+        inv_image = cv2.addWeighted(inv_image, 0.8, porosity_mask, 0.2, 0)
+        debug_image = inv_image
 
-        save_to = os.path.join("debug_images", kwargs["image_path"], f"tube{kwargs['tube_id']:0>2}.png")
-        os.makedirs(os.path.dirname(save_to), exist_ok=True)
-
-        if cv2.imwrite(save_to, inv_image):
-            logger.debug(f"Saved debug image {save_to}")
-        else:
-            logger.debug(f"Failed to save debug image {save_to}")
-
-    return porosity
+    return porosity, debug_image
 
 
 if __name__ == "__main__":

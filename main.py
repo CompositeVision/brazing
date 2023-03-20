@@ -57,9 +57,7 @@ def process_image(image_path: str) -> None:
         crop = tube_masked[ymin : ymin + h, xmin : xmin + w]
         tube_crops.append(crop)
 
-    porosities = []
-    with ProcessPoolExecutor(max_workers=len(tube_crops)) as pool:
-        porosities = list(pool.map(process_tube, tube_crops))
+    porosities = [process_tube(tube_crop) for tube_crop in tube_crops]
 
     # Step 5: Output results
 
@@ -121,7 +119,7 @@ def process_tube(image: npt.NDArray["uint8"]) -> tuple[float, Optional[npt.NDArr
 
     porosity = porosity_area / whole_area
 
-    # 3. Optionally output debug images
+    # Optionally output debug images
 
     debug_image = None
 

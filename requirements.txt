@@ -1,4 +1,4 @@
+onnx-runtime==1.14.1
 opencv-python-headless>=4.7.0
 numpy>=1.22.0
-torch>=2.0
-torchvision>=0.15
+tqdm>=4.65

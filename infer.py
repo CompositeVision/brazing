@@ -158,4 +158,12 @@ if __name__ == "__main__":
             masked = cv2.cvtColor(masked, cv2.COLOR_GRAY2RGB)
             porosity_mask = cv2.merge((np.zeros_like(porosity_mask), np.zeros_like(porosity_mask), porosity_mask))
             masked = cv2.addWeighted(masked, 0.8, porosity_mask, 0.2, 0)
+
+            # paste component numbers
+            for i, component in enumerate(components, start=1):
+                xmin, ymin, w, h = cv2.boundingRect(component)
+                xmin = max(xmin, 40)
+                ymin = max(ymin, 40)
+                cv2.putText(masked, str(i), (xmin, ymin), cv2.FONT_HERSHEY_PLAIN, 5, (0, 255, 0), 3)
+
             cv2.imwrite(os.path.join("debug_images", os.path.splitext(image_path)[0] + ".png"), masked)

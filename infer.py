@@ -150,7 +150,6 @@ if __name__ == "__main__":
             porosity_mask = cv2.bitwise_or(porosity_mask, porosity_mask_component)
             print(f"Tube {i}: {porosity * 100:.4f}%")
 
-        # TODO: move lower
         if args.debug:
             os.makedirs("debug_images", exist_ok=True)
             inverted = 255 - image
